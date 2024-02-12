@@ -5,6 +5,8 @@ import pickle
 import scipy.sparse as sp
 import sys
 import tensorflow as tf
+import torch
+#from sklearn.preprocessing import MinMaxScaler
 
 from scipy.sparse import linalg
 
@@ -63,6 +65,8 @@ class StandardScaler:
 
     def inverse_transform(self, data):
         return (data * self.std) + self.mean
+    
+
 
 
 def add_simple_summary(writer, names, values, global_step):
@@ -181,17 +185,42 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
         cat_data = np.load(os.path.join(dataset_dir, category + '.npz'))
         data['x_' + category] = cat_data['x']
         data['y_' + category] = cat_data['y']
-    scaler = StandardScaler(mean=data['x_train'][..., 0].mean(), std=data['x_train'][..., 0].std())
+
+
+    #scaler = StandardScaler(mean=data['x_train'][..., 0].mean(), std=data['x_train'][..., 0].std())
+    scaler = MinMaxScaler()
+    scaler.fit(data['x_train'])
+    
     # Data format
     for category in ['train', 'val', 'test']:
-        data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
+        #data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
+        #data['y_' + category][..., 0] = scaler.fit_transform(data['y_' + category][..., 0])
         data['y_' + category][..., 0] = scaler.transform(data['y_' + category][..., 0])
+
     data['train_loader'] = DataLoader(data['x_train'], data['y_train'], batch_size, shuffle=True)
     data['val_loader'] = DataLoader(data['x_val'], data['y_val'], test_batch_size, shuffle=False)
     data['test_loader'] = DataLoader(data['x_test'], data['y_test'], test_batch_size, shuffle=False)
     data['scaler'] = scaler
 
     return data
+
+class MinMaxScaler:
+    def __init__(self):
+        self.min = None
+        self.max = None
+
+    def fit(self, data):
+        self.min = data.min()
+        self.max = data.max()
+
+    def transform(self, data):
+        scaled_data = (data - self.min) / (self.max - self.min)
+        return scaled_data
+
+    def inverse_transform(self, scaled_data):
+        original_data = scaled_data * (self.max - self.min) + self.min
+        return original_data
+
 
 
 def load_graph_data(pkl_filename):

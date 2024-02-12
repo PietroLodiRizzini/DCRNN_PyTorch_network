@@ -1,6 +1,6 @@
 import os
 import time
-
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -125,9 +125,24 @@ class DCRNNSupervisor:
             y_preds = []
 
             for _, (x, y) in enumerate(val_iterator):
+                # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
+                node_mask = (x[:, :, :, 0] == 1)[0][0]
+                
+                # self._logger.info(f"x.shape: {x.shape}")
+                # x: (64, 50, 252, 47)
+
                 x, y = self._prepare_data(x, y)
 
-                output = self.dcrnn_model(x)
+                # x: torch.Size([50, 64, 11844])
+                #self._logger.info(f"x.shape: {x.shape}")
+
+                # [50, 64, 252]
+                output = self.dcrnn_model(x) # [num_timesteps_out, batch_size, num_nodes]
+
+                # filter the output in order to compute the loss only on the desired/active nodes
+                output = output[:, :, node_mask == 1]
+                y = y[:, :, node_mask == 1]
+
                 loss = self._compute_loss(y, output)
                 losses.append(loss.item())
 
@@ -135,6 +150,9 @@ class DCRNNSupervisor:
                 y_preds.append(output.cpu())
 
             mean_loss = np.mean(losses)
+
+            #self._logger.info(f"shape: {output.shape}")
+            #self._logger.info(f"len(y_truths):{len(y_truths)} len(y_preds): {len(y_preds)}")
 
             self._writer.add_scalar('{} loss'.format(dataset), mean_loss, batches_seen)
 
@@ -145,7 +163,13 @@ class DCRNNSupervisor:
             y_preds_scaled = []
             for t in range(y_preds.shape[0]):
                 y_truth = self.standard_scaler.inverse_transform(y_truths[t])
+                #y_truth = utils.inverse_transform(y_truths[t], self.standard_scaler)
                 y_pred = self.standard_scaler.inverse_transform(y_preds[t])
+                #y_pred = utils.inverse_transform(y_preds[t], self.standard_scaler)
+
+                # filter y_truth and y_pred
+
+                # list of containing batch_num tensors of shape [num_timesteps_out, batch_size, num_nodes] 
                 y_truths_scaled.append(y_truth)
                 y_preds_scaled.append(y_pred)
 
@@ -223,7 +247,40 @@ class DCRNNSupervisor:
                 self._logger.info(message)
 
             if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1:
-                test_loss, _ = self.evaluate(dataset='test', batches_seen=batches_seen)
+                test_loss, y = self.evaluate(dataset='test', batches_seen=batches_seen)
+
+                prediction = torch.tensor(y['prediction'])
+                truth = torch.tensor(y['truth'])
+
+                # Plots
+                num_snapshots = 5
+                snapshots = rand_ints = np.random.choice(range(0, prediction.shape[1]),
+                                                         size=num_snapshots,
+                                                         replace=False)
+
+                for snapshot in snapshots:
+                    y_pred_series = prediction[:, snapshot, :]  # Shape: (50, 36)
+                    y_true_series = truth[:, snapshot, :]  # Shape: (50, 36)
+
+                    # Create plots for each node
+                    for i in range(y_pred_series.shape[1]):
+                        fig = plt.figure()
+                        plt.plot(y_pred_series[:, i], label='Prediction')
+                        plt.plot(y_true_series[:, i], label='Ground Truth')
+                        plt.title(f"Node {i+1} Prediction vs. Ground Truth")
+                        plt.xlabel("Timestep")
+                        plt.ylabel("Value")
+                        plt.legend()
+
+                        # Save the plot as a PNG file
+                        plot_dir = os.path.join(self._log_dir, f"plots/epoch_{epoch_num}_snap_{snapshot}/")
+                        if not os.path.exists(plot_dir):
+                            os.makedirs(plot_dir)
+
+                        plt.savefig(os.path.join(plot_dir, f'plot_node_{i+1}.png'))
+                        plt.close()
+
+
                 message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, test_mae: {:.4f},  lr: {:.6f}, ' \
                           '{:.1f}s'.format(epoch_num, epochs, batches_seen,
                                            np.mean(losses), test_loss, lr_scheduler.get_lr()[0],
@@ -280,5 +337,7 @@ class DCRNNSupervisor:
 
     def _compute_loss(self, y_true, y_predicted):
         y_true = self.standard_scaler.inverse_transform(y_true)
+        #y_true = utils.inverse_transform(y_true.cpu(), self.standard_scaler).cuda()
         y_predicted = self.standard_scaler.inverse_transform(y_predicted)
+        #y_predicted = utils.inverse_transform(y_predicted.cpu(), self.standard_scaler).cuda()
         return masked_mae_loss(y_predicted, y_true)
