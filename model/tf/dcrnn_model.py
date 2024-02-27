@@ -4,9 +4,24 @@ from __future__ import print_function
 
 import tensorflow as tf
 
-from tensorflow.contrib import legacy_seq2seq
+import tensorflow as tf
+import tensorflow_addons as tfa
+
+#from tensorflow.contrib import legacy_seq2seq
+#import tensorflow_addons.seq2seq.rnn_decoder as rnn_decoder
 
 from model.tf.dcrnn_cell import DCGRUCell
+
+def rnn_decoder(decoder_inputs, initial_state, cell, loop_function=None):
+    state = initial_state
+    outputs = []
+    for i, inp in enumerate(decoder_inputs):
+        if loop_function is not None and i > 0:
+            inp = loop_function(outputs[-1], i)
+        output, state = cell(inp, state)
+        outputs.append(output)
+    return outputs, state
+
 
 
 class DCRNNModel(object):
@@ -33,9 +48,9 @@ class DCRNNModel(object):
         output_dim = int(model_kwargs.get('output_dim', 1))
 
         # Input (batch_size, timesteps, num_sensor, input_dim)
-        self._inputs = tf.placeholder(tf.float32, shape=(batch_size, seq_len, num_nodes, input_dim), name='inputs')
+        self._inputs = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, seq_len, num_nodes, input_dim), name='inputs')
         # Labels: (batch_size, timesteps, num_sensor, input_dim), same format with input except the temporal dimension.
-        self._labels = tf.placeholder(tf.float32, shape=(batch_size, horizon, num_nodes, input_dim), name='labels')
+        self._labels = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, horizon, num_nodes, input_dim), name='labels')
 
         # GO_SYMBOL = tf.zeros(shape=(batch_size, num_nodes * input_dim))
         GO_SYMBOL = tf.zeros(shape=(batch_size, num_nodes * output_dim))
@@ -46,12 +61,12 @@ class DCRNNModel(object):
                                          num_proj=output_dim, filter_type=filter_type)
         encoding_cells = [cell] * num_rnn_layers
         decoding_cells = [cell] * (num_rnn_layers - 1) + [cell_with_projection]
-        encoding_cells = tf.contrib.rnn.MultiRNNCell(encoding_cells, state_is_tuple=True)
-        decoding_cells = tf.contrib.rnn.MultiRNNCell(decoding_cells, state_is_tuple=True)
+        encoding_cells = tf.compat.v1.nn.rnn_cell.MultiRNNCell(encoding_cells, state_is_tuple=True)
+        decoding_cells = tf.compat.v1.nn.rnn_cell.MultiRNNCell(decoding_cells, state_is_tuple=True)
 
-        global_step = tf.train.get_or_create_global_step()
+        global_step = tf.compat.v1.train.get_or_create_global_step()
         # Outputs: (batch_size, timesteps, num_nodes, output_dim)
-        with tf.variable_scope('DCRNN_SEQ'):
+        with tf.compat.v1.variable_scope('DCRNN_SEQ'):
             inputs = tf.unstack(tf.reshape(self._inputs, (batch_size, seq_len, num_nodes * input_dim)), axis=1)
             labels = tf.unstack(
                 tf.reshape(self._labels[..., :output_dim], (batch_size, horizon, num_nodes * output_dim)), axis=1)
@@ -61,7 +76,7 @@ class DCRNNModel(object):
                 if is_training:
                     # Return either the model's prediction or the previous ground truth in training.
                     if use_curriculum_learning:
-                        c = tf.random_uniform((), minval=0, maxval=1.)
+                        c = tf.compat.v1.random_uniform((), minval=0, maxval=1.)
                         threshold = self._compute_sampling_threshold(global_step, cl_decay_steps)
                         result = tf.cond(tf.less(c, threshold), lambda: labels[i], lambda: prev)
                     else:
@@ -71,14 +86,14 @@ class DCRNNModel(object):
                     result = prev
                 return result
 
-            _, enc_state = tf.contrib.rnn.static_rnn(encoding_cells, inputs, dtype=tf.float32)
-            outputs, final_state = legacy_seq2seq.rnn_decoder(labels, enc_state, decoding_cells,
+            _, enc_state = tf.compat.v1.nn.static_rnn(encoding_cells, inputs, dtype=tf.float32)
+            outputs, final_state = rnn_decoder(labels, enc_state, decoding_cells,
                                                               loop_function=_loop_function)
 
         # Project the output to output_dim.
         outputs = tf.stack(outputs[:-1], axis=1)
         self._outputs = tf.reshape(outputs, (batch_size, horizon, num_nodes, output_dim), name='outputs')
-        self._merged = tf.summary.merge_all()
+        self._merged = tf.compat.v1.summary.merge_all()
 
     @staticmethod
     def _compute_sampling_threshold(global_step, k):

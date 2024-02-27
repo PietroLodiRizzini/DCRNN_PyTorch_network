@@ -6,10 +6,16 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from lib import utils
+from lib import plot_utils
 from model.pytorch.dcrnn_model import DCRNNModel
-from model.pytorch.loss import masked_mae_loss
+from model.pytorch.loss import *
+import torch.nn as nn
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from gpu import gpu
+
+gpu_id = gpu.get_gpu_id()
+device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+#device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
 
 
 class DCRNNSupervisor:
@@ -39,15 +45,23 @@ class DCRNNSupervisor:
         self.use_curriculum_learning = bool(
             self._model_kwargs.get('use_curriculum_learning', False))
         self.horizon = int(self._model_kwargs.get('horizon', 1))  # for the decoder
+        self.filter_test_loss = self._model_kwargs.get('filter_test_loss', False)
 
         # setup model
         dcrnn_model = DCRNNModel(adj_mx, self._logger, **self._model_kwargs)
-        self.dcrnn_model = dcrnn_model.cuda() if torch.cuda.is_available() else dcrnn_model
+        #dcrnn_model = nn.DataParallel(dcrnn_model)
+        dcrnn_model = dcrnn_model.cuda(gpu_id) if torch.cuda.is_available() else dcrnn_model
+        #dcrnn_model.to(device)
+
+        self.dcrnn_model = dcrnn_model
+        
         self._logger.info("Model created")
 
         self._epoch_num = self._train_kwargs.get('epoch', 0)
         if self._epoch_num > 0:
             self.load_model()
+
+        self.loss = self._model_kwargs.get('loss', 'mae')
 
     @staticmethod
     def _get_log_dir(kwargs):
@@ -61,17 +75,21 @@ class DCRNNSupervisor:
             structure = '-'.join(
                 ['%d' % rnn_units for _ in range(num_rnn_layers)])
             horizon = kwargs['model'].get('horizon')
+            seq_len = kwargs['model'].get('seq_len')
+            num_features = kwargs['model'].get('input_dim')
             filter_type = kwargs['model'].get('filter_type')
             filter_type_abbr = 'L'
             if filter_type == 'random_walk':
                 filter_type_abbr = 'R'
             elif filter_type == 'dual_random_walk':
                 filter_type_abbr = 'DR'
-            run_id = 'dcrnn_%s_%d_h_%d_%s_lr_%g_bs_%d_%s/' % (
+            '''run_id = 'dcrnn_%s_%d_h_%d_ %s_lr_%g_bs_%d_%s/' % (
                 filter_type_abbr, max_diffusion_step, horizon,
                 structure, learning_rate, batch_size,
-                time.strftime('%m%d%H%M%S'))
+                time.strftime('%m%d%H%M%S'))'''
+            run_id = f"{filter_type_abbr}_{max_diffusion_step}diffSteps_{num_rnn_layers}rnnLayers_{rnn_units}rnnUnits_{learning_rate}lr_{batch_size}batchSize"
             base_dir = kwargs.get('base_dir')
+            base_dir = os.path.join(base_dir, f"{seq_len}in_{horizon}out_{num_features}features")
             log_dir = os.path.join(base_dir, run_id)
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
@@ -126,7 +144,7 @@ class DCRNNSupervisor:
 
             for _, (x, y) in enumerate(val_iterator):
                 # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
-                node_mask = (x[:, :, :, 0] == 1)[0][0]
+                node_mask = plot_utils.get_active_nodes_mask(x)
                 
                 # self._logger.info(f"x.shape: {x.shape}")
                 # x: (64, 50, 252, 47)
@@ -136,12 +154,13 @@ class DCRNNSupervisor:
                 # x: torch.Size([50, 64, 11844])
                 #self._logger.info(f"x.shape: {x.shape}")
 
-                # [50, 64, 252]
+                # [num_timesteps_out, batch_size, num_nodes]
                 output = self.dcrnn_model(x) # [num_timesteps_out, batch_size, num_nodes]
 
                 # filter the output in order to compute the loss only on the desired/active nodes
-                output = output[:, :, node_mask == 1]
-                y = y[:, :, node_mask == 1]
+                if self.filter_test_loss and dataset == 'test':
+                    output = output[:, :, node_mask == 1] # 50, 64, 36
+                    y = y[:, :, node_mask == 1]
 
                 loss = self._compute_loss(y, output)
                 losses.append(loss.item())
@@ -163,9 +182,10 @@ class DCRNNSupervisor:
             y_preds_scaled = []
             for t in range(y_preds.shape[0]):
                 y_truth = self.standard_scaler.inverse_transform(y_truths[t])
-                #y_truth = utils.inverse_transform(y_truths[t], self.standard_scaler)
                 y_pred = self.standard_scaler.inverse_transform(y_preds[t])
-                #y_pred = utils.inverse_transform(y_preds[t], self.standard_scaler)
+
+                y_truth = y_truths[t]
+                y_pred = y_preds[t]
 
                 # filter y_truth and y_pred
 
@@ -174,10 +194,75 @@ class DCRNNSupervisor:
                 y_preds_scaled.append(y_pred)
 
             return mean_loss, {'prediction': y_preds_scaled, 'truth': y_truths_scaled}
+        
+    def evaluate_multiple_metrics(self, dataset='val', batches_seen=0):
+        with torch.no_grad():
+            self.dcrnn_model = self.dcrnn_model.eval()
+
+            dataset_iterator = self._data['{}_loader'.format(dataset)].get_iterator()
+
+            y_truths = []
+            y_preds = []
+            y_truths_filtered = [] # contains values only of active nodes
+            y_preds_filtered = []  # contains values only of active nodes
+
+            for _, (x, y) in enumerate(dataset_iterator):
+                # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
+                node_mask = plot_utils.get_active_nodes_mask(x)
+                # x: (batch_size, num_timesteps_out, num_nodes, num_node_features)
+
+                x, y = self._prepare_data(x, y)
+
+                # x: ([num_timesteps_out, batch_size, num_nodes*num_node_features])
+
+                # output: [num_timesteps_out, batch_size, num_nodes]
+                output = self.dcrnn_model(x)
+
+                # filter the output in order to compute the loss only on the desired/active nodes
+                if self.filter_test_loss and dataset == 'test':
+                    output_filtered = output[:, :, node_mask == 1] # 50, 64, 36
+                    y_filtered = y[:, :, node_mask == 1]
+                    # output_filtered, y_filtered: [num_timesteps_out, batch_size, num_active_nodes]
+                    y_preds_filtered.append(output_filtered.cpu())
+                    y_truths_filtered.append(y_filtered.cpu())
+                
+                y_truths.append(y.cpu())
+                y_preds.append(output.cpu())
+
+            #self._writer.add_scalar('{} loss'.format(dataset), mean_loss, batches_seen)
+
+            y_preds = np.concatenate(y_preds, axis=1)
+            y_truths = np.concatenate(y_truths, axis=1)  # concatenate on batch dimension
+
+            losses = {loss: self._compute_loss(torch.tensor(y_truths),
+                                               torch.tensor(y_preds), loss) for loss in ['mae', 'rmse', 'mape']}
+
+            y_truths_scaled = []
+            y_preds_scaled = []
+            y_truths_filtered_scaled = []
+            y_preds_filtered_scaled = []
+            for t in range(y_preds.shape[0]):
+                y_truth = self.standard_scaler.inverse_transform(y_truths[t])
+                y_pred = self.standard_scaler.inverse_transform(y_preds[t])
+                y_truth_filtered = self.standard_scaler.inverse_transform(y_truths_filtered[t])
+                y_pred_filtered = self.standard_scaler.inverse_transform(y_preds_filtered[t])
+
+                y_truth = y_truths[t]
+                y_pred = y_preds[t]
+                y_truth_filtered = y_truths_filtered[t]
+                y_pred_filtered = y_preds_filtered[t]
+
+                # list of containing batch_num tensors of shape [num_timesteps_out, batch_size, num_nodes] 
+                y_truths_scaled.append(y_truth)
+                y_preds_scaled.append(y_pred)
+                y_truths_filtered_scaled.append(y_truth_filtered)
+                y_preds_filtered_scaled.append(y_pred_filtered)
+
+            return losses, {'prediction': y_preds_scaled, 'truth': y_truths_scaled, 'prediction_filtered': y_preds_filtered_scaled, 'truth_filtered': y_truths_filtered_scaled}
 
     def _train(self, base_lr,
-               steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=1,
-               test_every_n_epochs=10, epsilon=1e-8, **kwargs):
+               steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=True,
+               test_every_n_epochs=10, store_val_plot=True, epsilon=1e-8, loss_plot_every_n_epochs=5, **kwargs):
         # steps is used in learning rate - will see if need to use it?
         min_val_loss = float('inf')
         wait = 0
@@ -193,6 +278,9 @@ class DCRNNSupervisor:
         self._logger.info("num_batches:{}".format(num_batches))
 
         batches_seen = num_batches * self._epoch_num
+
+        train_loss_history = []
+        val_loss_history = []
 
         for epoch_num in range(self._epoch_num, epochs):
 
@@ -224,16 +312,27 @@ class DCRNNSupervisor:
                 loss.backward()
 
                 # gradient clipping - this does it in place
-                torch.nn.utils.clip_grad_norm_(self.dcrnn_model.parameters(), self.max_grad_norm)
+                #torch.nn.utils.clip_grad_norm_(self.dcrnn_model.parameters(), self.max_grad_norm)
 
                 optimizer.step()
             self._logger.info("epoch complete")
             lr_scheduler.step()
             self._logger.info("evaluating now!")
 
-            val_loss, _ = self.evaluate(dataset='val', batches_seen=batches_seen)
+            val_loss, y_val = self.evaluate(dataset='val', batches_seen=batches_seen)
+            val_loss_decreased = val_loss < min_val_loss
+
+            if store_val_plot and val_loss_decreased:
+                prediction = torch.tensor(y_val['prediction'])
+                truth = torch.tensor(y_val['truth'])
+                
+                path = os.path.join(self._log_dir, 'plots/val/')
+                plot_utils.store_pred_vs_truth_plots(self._data['x_val'], self._data['y_val'], prediction, truth, path)
 
             end_time = time.time()
+
+            train_loss_history.append(np.mean(losses))
+            val_loss_history.append(val_loss)
 
             self._writer.add_scalar('training loss',
                                     np.mean(losses),
@@ -246,48 +345,31 @@ class DCRNNSupervisor:
                                            (end_time - start_time))
                 self._logger.info(message)
 
-            if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1:
-                test_loss, y = self.evaluate(dataset='test', batches_seen=batches_seen)
+            if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1 or val_loss_decreased:
+                # test
+                # evaluate model on test data
+                test_losses, y = self.evaluate_multiple_metrics(dataset='test', batches_seen=batches_seen)
 
+                # store prediction vs truth plots
                 prediction = torch.tensor(y['prediction'])
                 truth = torch.tensor(y['truth'])
+                path = os.path.join(self._log_dir, 'plots/test/')
+                plot_utils.store_pred_vs_truth_plots(self._data['x_test'], self._data['y_test'], prediction, truth, path)
 
-                # Plots
-                num_snapshots = 5
-                snapshots = rand_ints = np.random.choice(range(0, prediction.shape[1]),
-                                                         size=num_snapshots,
-                                                         replace=False)
-
-                for snapshot in snapshots:
-                    y_pred_series = prediction[:, snapshot, :]  # Shape: (50, 36)
-                    y_true_series = truth[:, snapshot, :]  # Shape: (50, 36)
-
-                    # Create plots for each node
-                    for i in range(y_pred_series.shape[1]):
-                        fig = plt.figure()
-                        plt.plot(y_pred_series[:, i], label='Prediction')
-                        plt.plot(y_true_series[:, i], label='Ground Truth')
-                        plt.title(f"Node {i+1} Prediction vs. Ground Truth")
-                        plt.xlabel("Timestep")
-                        plt.ylabel("Value")
-                        plt.legend()
-
-                        # Save the plot as a PNG file
-                        plot_dir = os.path.join(self._log_dir, f"plots/epoch_{epoch_num}_snap_{snapshot}/")
-                        if not os.path.exists(plot_dir):
-                            os.makedirs(plot_dir)
-
-                        plt.savefig(os.path.join(plot_dir, f'plot_node_{i+1}.png'))
-                        plt.close()
-
-
-                message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, test_mae: {:.4f},  lr: {:.6f}, ' \
+                message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, test_mae: {:.4f}, test_rmse: {:.4f}, test_mape: {:.4f},  lr: {:.6f}, ' \
                           '{:.1f}s'.format(epoch_num, epochs, batches_seen,
-                                           np.mean(losses), test_loss, lr_scheduler.get_lr()[0],
+                                           np.mean(losses), test_losses['mae'], test_losses['rmse'], test_losses['mape'], lr_scheduler.get_lr()[0],
                                            (end_time - start_time))
                 self._logger.info(message)
 
-            if val_loss < min_val_loss:
+                
+            # store loss plot
+            if (epoch_num % loss_plot_every_n_epochs) == loss_plot_every_n_epochs - 1:
+                self._logger.info(f"Storing loss plot")
+                plot_utils.store_loss_plot(train_loss_history, val_loss_history, self._log_dir)
+                
+            
+            if val_loss_decreased:
                 wait = 0
                 if save_model:
                     model_file_name = self.save_model(epoch_num)
@@ -335,9 +417,18 @@ class DCRNNSupervisor:
                                           self.num_nodes * self.output_dim)
         return x, y
 
-    def _compute_loss(self, y_true, y_predicted):
-        y_true = self.standard_scaler.inverse_transform(y_true)
-        #y_true = utils.inverse_transform(y_true.cpu(), self.standard_scaler).cuda()
-        y_predicted = self.standard_scaler.inverse_transform(y_predicted)
-        #y_predicted = utils.inverse_transform(y_predicted.cpu(), self.standard_scaler).cuda()
-        return masked_mae_loss(y_predicted, y_true)
+    def _compute_loss(self, y_true, y_predicted, loss = None):
+        #y_true = self.standard_scaler.inverse_transform(y_true)
+        #y_predicted = self.standard_scaler.inverse_transform(y_predicted)
+        if loss is None:
+            loss = self.loss
+        
+        if loss == 'mae':
+            return masked_mae_loss(y_predicted, y_true)
+        elif loss == 'mse':
+            return masked_mse_loss(y_predicted, y_true)
+        elif loss == 'rmse':
+            return masked_rmse_loss(y_predicted, y_true)
+        elif loss == 'mape':
+            return masked_mape_loss(y_predicted, y_true)
+        

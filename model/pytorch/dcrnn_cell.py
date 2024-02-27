@@ -3,8 +3,11 @@ import torch
 
 from lib import utils
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from gpu import gpu
 
+gpu_id = gpu.get_gpu_id()
+device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+#device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
 
 class LayerParams:
     def __init__(self, rnn_network: torch.nn.Module, layer_type: str):
@@ -68,6 +71,7 @@ class DCGRUCell(torch.nn.Module):
         for support in supports:
             self._supports.append(self._build_sparse_matrix(support))
 
+
         self._fc_params = LayerParams(self, 'fc')
         self._gconv_params = LayerParams(self, 'gconv')
 
@@ -123,6 +127,8 @@ class DCGRUCell(torch.nn.Module):
         value += biases
         return value
 
+    # inputs: (B, num_nodes * input_dim)
+    # r*hx
     def _gconv(self, inputs, state, output_size, bias_start=0.0):
         # Reshape input and state to (batch_size, num_nodes, input_dim/state_dim)
         batch_size = inputs.shape[0]
@@ -148,8 +154,12 @@ class DCGRUCell(torch.nn.Module):
                     x = self._concat(x, x2)
                     x1, x0 = x2, x1
 
+
         num_matrices = len(self._supports) * self._max_diffusion_step + 1  # Adds for x itself.
         x = torch.reshape(x, shape=[num_matrices, self._num_nodes, input_size, batch_size])
+
+        # (x[2,:,:,:] == x[1,:,:,:]) 
+
         x = x.permute(3, 1, 2, 0)  # (batch_size, num_nodes, input_size, order)
         x = torch.reshape(x, shape=[batch_size * self._num_nodes, input_size * num_matrices])
 

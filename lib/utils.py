@@ -6,6 +6,10 @@ import scipy.sparse as sp
 import sys
 import tensorflow as tf
 import torch
+import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Pool
+
 #from sklearn.preprocessing import MinMaxScaler
 
 from scipy.sparse import linalg
@@ -79,7 +83,7 @@ def add_simple_summary(writer, names, values, global_step):
     :return:
     """
     for name, value in zip(names, values):
-        summary = tf.Summary()
+        summary = tf.compat.v1.Summary()
         summary_value = summary.value.add()
         summary_value.simple_value = value
         summary_value.tag = name
@@ -173,9 +177,10 @@ def get_total_trainable_parameter_size():
     :return:
     """
     total_parameters = 0
-    for variable in tf.trainable_variables():
+    for variable in tf.compat.v1.trainable_variables():
         # shape is an array of tf.Dimension
-        total_parameters += np.product([x.value for x in variable.get_shape()])
+        #total_parameters += np.product([x.value for x in variable.get_shape()])
+        total_parameters += np.product([x for x in variable.get_shape()])
     return total_parameters
 
 
@@ -187,14 +192,14 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
         data['y_' + category] = cat_data['y']
 
 
-    #scaler = StandardScaler(mean=data['x_train'][..., 0].mean(), std=data['x_train'][..., 0].std())
+    scaler = StandardScaler(mean=data['x_train'][..., 1:].mean(), std=data['x_train'][..., 1:].std())
     scaler = MinMaxScaler()
     scaler.fit(data['x_train'])
     
     # Data format
     for category in ['train', 'val', 'test']:
-        #data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
-        #data['y_' + category][..., 0] = scaler.fit_transform(data['y_' + category][..., 0])
+        data['x_' + category][..., 1:] = scaler.transform(data['x_' + category][..., 1:])
+        # data['y_' + category][..., 0] = scaler.fit_transform(data['y_' + category][..., 0])
         data['y_' + category][..., 0] = scaler.transform(data['y_' + category][..., 0])
 
     data['train_loader'] = DataLoader(data['x_train'], data['y_train'], batch_size, shuffle=True)

@@ -4,7 +4,11 @@ import torch.nn as nn
 
 from model.pytorch.dcrnn_cell import DCGRUCell
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from gpu import gpu
+
+gpu_id = gpu.get_gpu_id()
+device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+#device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
 
 
 def count_parameters(model):
@@ -145,6 +149,11 @@ class DCRNNModel(nn.Module, Seq2SeqAttrs):
                 c = np.random.uniform(0, 1)
                 if c < self._compute_sampling_threshold(batches_seen):
                     decoder_input = labels[t]
+
+            ###
+            if self.training:
+                decoder_input = labels[t]
+            ###
         outputs = torch.stack(outputs)
         return outputs
 

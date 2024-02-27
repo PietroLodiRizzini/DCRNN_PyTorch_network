@@ -5,13 +5,21 @@ from __future__ import print_function
 import argparse
 import yaml
 
+from gpu import gpu
+#gpu.set_gpu_id(1)
+
 from lib.utils import load_graph_data
-from model.pytorch.dcrnn_supervisor import DCRNNSupervisor
+
 
 
 def main(args):
     with open(args.config_filename) as f:
         supervisor_config = yaml.load(f)
+
+        gpu_id = supervisor_config.get('gpu_id', 0)
+        gpu.set_gpu_id(gpu_id)
+
+        from model.pytorch.dcrnn_supervisor import DCRNNSupervisor
 
         graph_pkl_filename = supervisor_config['data'].get('graph_pkl_filename')
         sensor_ids, sensor_id_to_ind, adj_mx = load_graph_data(graph_pkl_filename)
