@@ -194,7 +194,7 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
 
     scaler = StandardScaler(mean=data['x_train'][..., 1:].mean(), std=data['x_train'][..., 1:].std())
     scaler = MinMaxScaler()
-    scaler.fit(data['x_train'])
+    scaler.fit(np.concatenate(np.reshape(data['x_train'], -1), np.reshape(data['y_train'], -1)))
     
     # Data format
     for category in ['train', 'val', 'test']:
