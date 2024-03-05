@@ -198,9 +198,10 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     
     # Data format
     for category in ['train', 'val', 'test']:
-        data['x_' + category][..., 1:] = scaler.transform(data['x_' + category][..., 1:])
+        #data['x_' + category][..., 1:] = scaler.transform(data['x_' + category][..., 1:])
+        data['x_' + category][..., :] = scaler.transform(data['x_' + category][..., :])
         # data['y_' + category][..., 0] = scaler.fit_transform(data['y_' + category][..., 0])
-        data['y_' + category][..., 0] = scaler.transform(data['y_' + category][..., 0])
+        data['y_' + category][..., :] = scaler.transform(data['y_' + category][..., :])
 
     data['train_loader'] = DataLoader(data['x_train'], data['y_train'], batch_size, shuffle=True)
     data['val_loader'] = DataLoader(data['x_val'], data['y_val'], test_batch_size, shuffle=False)
@@ -210,7 +211,7 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     return data
 
 def load_active_nodes(dataset_dir):
-    return np.load(os.path.join(dataset_dir, 'active_nodes.npz'))
+    return np.load(os.path.join(dataset_dir, 'active_nodes.npz'))['active_nodes']
 
 class MinMaxScaler:
     def __init__(self):

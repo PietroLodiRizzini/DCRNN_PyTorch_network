@@ -11,7 +11,6 @@ from gpu import gpu
 from lib.utils import load_graph_data
 
 
-
 def main(args):
     with open(args.config_filename) as f:
         supervisor_config = yaml.load(f)

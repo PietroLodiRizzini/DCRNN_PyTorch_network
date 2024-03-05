@@ -25,6 +25,12 @@ class DCRNNSupervisor:
         self._model_kwargs = kwargs.get('model')
         self._train_kwargs = kwargs.get('train')
 
+        dataset_dir = self._data_kwargs.get('dataset_dir')
+        for replace in ['horizon', 'seq_len', 'input_dim', 'output_dim']:
+            value = self._model_kwargs.get(replace)
+            dataset_dir = dataset_dir.replace(f"[{replace}]", str(value))
+        self._data_kwargs['dataset_dir'] = dataset_dir
+
         self.max_grad_norm = self._train_kwargs.get('max_grad_norm', 1.)
 
         # logging.
@@ -37,7 +43,7 @@ class DCRNNSupervisor:
 
         # data set
         self._data = utils.load_dataset(**self._data_kwargs)
-        self._active_nodes = utils.load_active_nodes()
+        self._active_nodes = utils.load_active_nodes(self._data_kwargs.get('dataset_dir'))
 
         self.standard_scaler = self._data['scaler']
 
@@ -81,6 +87,7 @@ class DCRNNSupervisor:
             horizon = kwargs['model'].get('horizon')
             seq_len = kwargs['model'].get('seq_len')
             num_features = kwargs['model'].get('input_dim')
+            num_targets = kwargs['model'].get('output_dim')
             filter_type = kwargs['model'].get('filter_type')
             filter_type_abbr = 'L'
             if filter_type == 'random_walk':
@@ -93,7 +100,7 @@ class DCRNNSupervisor:
                 time.strftime('%m%d%H%M%S'))'''
             run_id = f"{filter_type_abbr}_{max_diffusion_step}diffSteps_{num_rnn_layers}rnnLayers_{rnn_units}rnnUnits_{learning_rate}lr_{batch_size}batchSize_{time.strftime('%m%d%H%M%S')}"
             base_dir = kwargs.get('base_dir')
-            base_dir = os.path.join(base_dir, f"{seq_len}in_{horizon}out_{num_features}features")
+            base_dir = os.path.join(base_dir, f"{seq_len}in_{horizon}out_{num_features}features_{num_targets}targets")
             log_dir = os.path.join(base_dir, run_id)
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
@@ -146,19 +153,18 @@ class DCRNNSupervisor:
             y_truths = []
             y_preds = []
 
-            for _, (x, y) in enumerate(val_iterator):
-                # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
-                node_mask = self._active_nodes
-                
-                # self._logger.info(f"x.shape: {x.shape}")
-                # x: (64, 50, 252, 47)
+            # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
+            node_mask = self._active_nodes
+            num_nodes = len(node_mask)
+            num_active_nodes = node_mask.sum()
 
-                x, y = self._prepare_data(x, y)
+            for _, (_x, _y) in enumerate(val_iterator):
+                x, y = self._prepare_data(_x, _y)
 
-                # x: torch.Size([50, 64, 11844])
-                #self._logger.info(f"x.shape: {x.shape}")
+                # x: ([num_timesteps_in, batch_size, num_nodes*num_node_features])
+                # y: ([num_timesteps_out, batch_size, num_nodes*num_targets])
 
-                # [num_timesteps_out, batch_size, num_nodes]
+                # [num_timesteps_out, batch_size, num_nodes*num_targets]
                 output = self.dcrnn_model(x) # [num_timesteps_out, batch_size, num_nodes]
 
                 # filter the output in order to compute the loss only on the desired/active nodes
@@ -169,8 +175,13 @@ class DCRNNSupervisor:
                 loss = self._compute_loss(y, output)
                 losses.append(loss.item())
 
-                y_truths.append(y.cpu())
-                y_preds.append(output.cpu())
+                num_timesteps_out = y.shape[0]
+                batch_size = y.shape[1]
+                num_targets = _y.shape[3]
+
+                y_truths.append(np.reshape(y.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))[:, :, :, 0])
+                y_preds.append(np.reshape(output.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))[:, :, :, 0])
+                #y_preds.append(output[:, :, :num_nodes].cpu())
 
             mean_loss = np.mean(losses)
 
@@ -199,7 +210,7 @@ class DCRNNSupervisor:
 
             return mean_loss, {'prediction': y_preds_scaled, 'truth': y_truths_scaled}
         
-    def evaluate_multiple_metrics(self, dataset='val', batches_seen=0):
+    def evaluate_multiple_metrics(self, dataset='val', batches_seen=0, predict_n_timesteps=1):
         with torch.no_grad():
             self.dcrnn_model = self.dcrnn_model.eval()
 
@@ -210,30 +221,50 @@ class DCRNNSupervisor:
             y_truths_filtered = [] # contains values only of active nodes
             y_preds_filtered = []  # contains values only of active nodes
 
-            for _, (x, y) in enumerate(dataset_iterator):
-                # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
-                node_mask = self._active_nodes
-                # x: (batch_size, num_timesteps_out, num_nodes, num_node_features)
+            # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
+            node_mask = self._active_nodes
+            num_nodes = len(node_mask)
+            num_active_nodes = node_mask.sum()
 
-                x, y = self._prepare_data(x, y)
+            for _, (_x, _y) in enumerate(dataset_iterator):
+                
+                # _x: (batch_size, num_timesteps_in, num_nodes, num_node_features)
 
-                # x: ([num_timesteps_out, batch_size, num_nodes*num_node_features])
+                x, y = self._prepare_data(_x, _y)
 
-                # output: [num_timesteps_out, batch_size, num_nodes]
+                # x: ([num_timesteps_in, batch_size, num_nodes*num_node_features])
+                # y: ([num_timesteps_out, batch_size, num_nodes*num_targets])
+
+                # output: [num_timesteps_out, batch_size, num_nodes*num_targets]
                 output = self.dcrnn_model(x)
+
+                num_timesteps_out = output.shape[0]
+                batch_size = output.shape[1]
+                num_targets = _y.shape[3]
+
+                _output = np.reshape(output.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))
+                _output = np.transpose(_output, (1, 0, 2, 3)).cpu()
+                # iteration-duration is the 0-th element in dim 3 of _output: remove it
+                next_input = np.concatenate([_x[:, 1:, :, :], np.array(_output[:, :, :, 1:])], axis=1)
 
                 # filter the output in order to compute the loss only on the desired/active nodes
                 if self.filter_test_loss and dataset == 'test':
-                    output_filtered = output[:, :, node_mask == 1] # 50, 64, 36
-                    y_filtered = y[:, :, node_mask == 1]
+                    output_filtered = np.reshape(output.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))
+                    output_filtered = output_filtered[:, :, node_mask == 1, 0]
+                    output_filtered = np.reshape(output_filtered, (num_timesteps_out, batch_size, num_active_nodes))
+                    #output_filtered = output[:, :, node_mask == 1] # 50, 64, 36
+                    y_filtered = np.reshape(y.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))
+                    y_filtered = y_filtered[:, :, node_mask == 1, 0]
+                    y_filtered = np.reshape(y_filtered, (num_timesteps_out, batch_size, num_active_nodes))
+                    #y_filtered = y[:, :, node_mask == 1]
                     # output_filtered, y_filtered: [num_timesteps_out, batch_size, num_active_nodes]
                     y_preds_filtered.append(output_filtered.cpu())
                     y_truths_filtered.append(y_filtered.cpu())
                 
-                y_truths.append(y.cpu())
-                y_preds.append(output.cpu())
-                y_truths_filtered.append(y.cpu())
-                y_preds_filtered.append(output.cpu())
+                y_truths.append(np.reshape(y.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))[:, :, :, 0])
+                y_preds.append(np.reshape(output.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))[:, :, :, 0])
+                #y_truths_filtered.append(y.cpu())
+                #y_preds_filtered.append(output.cpu())
 
             #self._writer.add_scalar('{} loss'.format(dataset), mean_loss, batches_seen)
 
@@ -270,7 +301,7 @@ class DCRNNSupervisor:
 
     def _train(self, base_lr,
                steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=True,
-               test_every_n_epochs=10, store_val_plot=True, epsilon=1e-8, loss_plot_every_n_epochs=5, **kwargs):
+               test_every_n_epochs=10, store_val_plot=True, epsilon=1e-8, loss_plot_every_n_epochs=1, **kwargs):
         # steps is used in learning rate - will see if need to use it?
         min_val_loss = float('inf')
         wait = 0
