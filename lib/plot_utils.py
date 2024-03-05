@@ -22,8 +22,7 @@ def get_active_nodes_mask(x):
     elif len(x.shape) == 3:
         return (x[:, :, 0] == 1)[0]
     
-def get_active_nodes_ids(x):
-    mask = get_active_nodes_mask(x)
+def get_active_nodes_ids(mask):
     return np.where(mask == 1)[0]
 
 def dragonfly_node_id(graph_node_id):
@@ -62,12 +61,12 @@ def process_snapshot(snapshot, prediction, truth, path, active_nodes):
         plt.close(fig)
 
 
-def store_pred_vs_truth_plots(x, y, y_pred, truth, path):
+def store_pred_vs_truth_plots(x, y, y_pred, truth, active_nodes, path):
     """
         x: [batch_size, num_timesteps_out, num_nodes, num_node_features]
         y, y_pred: [batch_size, num_timesteps_out, num_nodes, 1]
     """
-    active_graph_nodes_ids = get_active_nodes_ids(x)
+    active_graph_nodes_ids = get_active_nodes_ids(active_nodes)
     
     
     #plot_sliding_window_avg(y_pred, y, epoch_num, path, active_graph_nodes_ids)

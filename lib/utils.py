@@ -194,7 +194,7 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
 
     scaler = StandardScaler(mean=data['x_train'][..., 1:].mean(), std=data['x_train'][..., 1:].std())
     scaler = MinMaxScaler()
-    scaler.fit(np.concatenate(np.reshape(data['x_train'], -1), np.reshape(data['y_train'], -1)))
+    scaler.fit(np.concatenate((np.reshape(data['x_train'], -1), np.reshape(data['y_train'], -1))))
     
     # Data format
     for category in ['train', 'val', 'test']:
@@ -208,6 +208,9 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     data['scaler'] = scaler
 
     return data
+
+def load_active_nodes(dataset_dir):
+    return np.load(os.path.join(dataset_dir, 'active_nodes.npz'))
 
 class MinMaxScaler:
     def __init__(self):

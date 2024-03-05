@@ -33,9 +33,12 @@ class DCRNNSupervisor:
 
         log_level = self._kwargs.get('log_level', 'INFO')
         self._logger = utils.get_logger(self._log_dir, __name__, 'info.log', level=log_level)
+        self._logger.info("Start logging")
 
         # data set
         self._data = utils.load_dataset(**self._data_kwargs)
+        self._active_nodes = utils.load_active_nodes()
+
         self.standard_scaler = self._data['scaler']
 
         self.num_nodes = int(self._model_kwargs.get('num_nodes', 1))
@@ -56,6 +59,7 @@ class DCRNNSupervisor:
         self.dcrnn_model = dcrnn_model
         
         self._logger.info("Model created")
+        self._logger.info(f"Using {device.type}")
 
         self._epoch_num = self._train_kwargs.get('epoch', 0)
         if self._epoch_num > 0:
@@ -87,7 +91,7 @@ class DCRNNSupervisor:
                 filter_type_abbr, max_diffusion_step, horizon,
                 structure, learning_rate, batch_size,
                 time.strftime('%m%d%H%M%S'))'''
-            run_id = f"{filter_type_abbr}_{max_diffusion_step}diffSteps_{num_rnn_layers}rnnLayers_{rnn_units}rnnUnits_{learning_rate}lr_{batch_size}batchSize"
+            run_id = f"{filter_type_abbr}_{max_diffusion_step}diffSteps_{num_rnn_layers}rnnLayers_{rnn_units}rnnUnits_{learning_rate}lr_{batch_size}batchSize_{time.strftime('%m%d%H%M%S')}"
             base_dir = kwargs.get('base_dir')
             base_dir = os.path.join(base_dir, f"{seq_len}in_{horizon}out_{num_features}features")
             log_dir = os.path.join(base_dir, run_id)
@@ -144,7 +148,7 @@ class DCRNNSupervisor:
 
             for _, (x, y) in enumerate(val_iterator):
                 # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
-                node_mask = plot_utils.get_active_nodes_mask(x)
+                node_mask = self._active_nodes
                 
                 # self._logger.info(f"x.shape: {x.shape}")
                 # x: (64, 50, 252, 47)
@@ -208,7 +212,7 @@ class DCRNNSupervisor:
 
             for _, (x, y) in enumerate(dataset_iterator):
                 # mask of len num_nodes (252) that is 1 for node ids that are active, 0 otherwise
-                node_mask = plot_utils.get_active_nodes_mask(x)
+                node_mask = self._active_nodes
                 # x: (batch_size, num_timesteps_out, num_nodes, num_node_features)
 
                 x, y = self._prepare_data(x, y)
@@ -228,11 +232,15 @@ class DCRNNSupervisor:
                 
                 y_truths.append(y.cpu())
                 y_preds.append(output.cpu())
+                y_truths_filtered.append(y.cpu())
+                y_preds_filtered.append(output.cpu())
 
             #self._writer.add_scalar('{} loss'.format(dataset), mean_loss, batches_seen)
 
             y_preds = np.concatenate(y_preds, axis=1)
             y_truths = np.concatenate(y_truths, axis=1)  # concatenate on batch dimension
+            y_preds_filtered = np.concatenate(y_preds_filtered, axis=1)
+            y_truths_filtered = np.concatenate(y_truths_filtered, axis=1)  # concatenate on batch dimension
 
             losses = {loss: self._compute_loss(torch.tensor(y_truths),
                                                torch.tensor(y_preds), loss) for loss in ['mae', 'rmse', 'mape']}
@@ -327,7 +335,7 @@ class DCRNNSupervisor:
                 truth = torch.tensor(y_val['truth'])
                 
                 path = os.path.join(self._log_dir, 'plots/val/')
-                plot_utils.store_pred_vs_truth_plots(self._data['x_val'], self._data['y_val'], prediction, truth, path)
+                plot_utils.store_pred_vs_truth_plots(self._data['x_val'], self._data['y_val'], prediction, truth, self._active_nodes, path)
 
             end_time = time.time()
 
@@ -354,7 +362,9 @@ class DCRNNSupervisor:
                 prediction = torch.tensor(y['prediction'])
                 truth = torch.tensor(y['truth'])
                 path = os.path.join(self._log_dir, 'plots/test/')
-                plot_utils.store_pred_vs_truth_plots(self._data['x_test'], self._data['y_test'], prediction, truth, path)
+                plot_utils.store_pred_vs_truth_plots(self._data['x_test'], self._data['y_test'], prediction, truth, self._active_nodes, path)
+
+                # store prediction vs truth values
 
                 message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, test_mae: {:.4f}, test_rmse: {:.4f}, test_mape: {:.4f},  lr: {:.6f}, ' \
                           '{:.1f}s'.format(epoch_num, epochs, batches_seen,
