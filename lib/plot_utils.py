@@ -149,7 +149,11 @@ def plot_sliding_window(y_pred, y, path, active_nodes):
     num_timesteps_out = y_pred.shape[0]
     num_windows = y_pred.shape[1]
 
-    for node in active_nodes:
+    predictions = []
+    ground_truths = []
+
+    #for node in range(len(active_nodes)):
+    for node in range(4):
         dragonfly_node_id_val = dragonfly_node_id(node)
         plot_y_pred = []
         plot_y_real = []
@@ -162,7 +166,10 @@ def plot_sliding_window(y_pred, y, path, active_nodes):
             plot_y_pred.extend(y_pred[:ub_1, i, node])
             plot_y_real.extend(y[:ub_1, i, node])
 
-        fig, ax = plt.subplots()
+        predictions.append(plot_y_pred)
+        ground_truths.append(plot_y_real)
+
+        fig, ax = plt.subplots(figsize=(30, 20))
         
         ax.plot(plot_y_pred, label='Prediction')
         ax.plot(plot_y_real, label='Ground Truth')
@@ -178,11 +185,16 @@ def plot_sliding_window(y_pred, y, path, active_nodes):
         plt.savefig(os.path.join(plot_dir, f'node_{node}.png'))
         plt.close(fig)
 
+    # Save predictions and ground truth to npz file
+    np.savez(os.path.join(path, 'predictions_ground_truth.npz'), predictions=predictions, ground_truths=ground_truths)
+
+
 def store_loss_plot(train_loss_history, val_loss_history, save_path):
     """
     Stores a png of the plot to save_path
     """
     epochs = range(1, len(train_loss_history) + 1)
+    plt.figure(figsize=(15, 10))
     plt.clf()
     
     plt.plot(epochs, train_loss_history, '-', color="orange", label='Training loss')

@@ -168,7 +168,7 @@ class DCRNNSupervisor:
                 output = self.dcrnn_model(x) # [num_timesteps_out, batch_size, num_nodes]
 
                 # filter the output in order to compute the loss only on the desired/active nodes
-                if self.filter_test_loss and dataset == 'test':
+                if self.filter_test_loss: #and dataset == 'test':
                     output = output[:, :, node_mask == 1] # 50, 64, 36
                     y = y[:, :, node_mask == 1]
 
@@ -179,8 +179,10 @@ class DCRNNSupervisor:
                 batch_size = y.shape[1]
                 num_targets = _y.shape[3]
 
-                y_truths.append(np.reshape(y.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))[:, :, :, 0])
-                y_preds.append(np.reshape(output.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))[:, :, :, 0])
+                #y_truths.append(np.reshape(y.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))[:, :, :, 0])
+                y_truths.append(np.reshape(y.cpu(), (num_timesteps_out, batch_size, num_active_nodes, num_targets))[:, :, :, 0])
+
+                y_preds.append(np.reshape(output.cpu(), (num_timesteps_out, batch_size, num_active_nodes, num_targets))[:, :, :, 0])
                 #y_preds.append(output[:, :, :num_nodes].cpu())
 
             mean_loss = np.mean(losses)
@@ -245,7 +247,7 @@ class DCRNNSupervisor:
                 _output = np.reshape(output.cpu(), (num_timesteps_out, batch_size, num_nodes, num_targets))
                 _output = np.transpose(_output, (1, 0, 2, 3)).cpu()
                 # iteration-duration is the 0-th element in dim 3 of _output: remove it
-                next_input = np.concatenate([_x[:, 1:, :, :], np.array(_output[:, :, :, 1:])], axis=1)
+                # next_input = np.concatenate([_x[:, 1:, :, :], np.array(_output[:, :, :, 1:])], axis=1)
 
                 # filter the output in order to compute the loss only on the desired/active nodes
                 if self.filter_test_loss and dataset == 'test':
@@ -305,10 +307,12 @@ class DCRNNSupervisor:
         # steps is used in learning rate - will see if need to use it?
         min_val_loss = float('inf')
         wait = 0
+        #wait_plot = 0
+        #wait_plot_thresh = 10
         optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=base_lr, eps=epsilon)
 
-        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=steps,
-                                                            gamma=lr_decay_ratio)
+        #lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=steps,
+        #                                                    gamma=lr_decay_ratio)
 
         self._logger.info('Start training ...')
 
@@ -320,9 +324,9 @@ class DCRNNSupervisor:
 
         train_loss_history = []
         val_loss_history = []
-
+        #'''
         for epoch_num in range(self._epoch_num, epochs):
-
+            #wait_plot += 1
             self.dcrnn_model = self.dcrnn_model.train()
 
             train_iterator = self._data['train_loader'].get_iterator()
@@ -355,18 +359,79 @@ class DCRNNSupervisor:
 
                 optimizer.step()
             self._logger.info("epoch complete")
-            lr_scheduler.step()
+            #lr_scheduler.step()
             self._logger.info("evaluating now!")
+            
+            '''    
+        for epoch_num in range(self._epoch_num, epochs):
+            #wait_plot += 1
+            self.dcrnn_model = self.dcrnn_model.train()
+            train_iterator = self._data['train_loader'].get_iterator()
+            losses = []
+
+            start_time = time.time()
+
+            for _, (x, y) in enumerate(train_iterator):
+                optimizer.zero_grad()
+
+                x, y = self._prepare_data(x, y)
+
+                # Compute output
+                output = self.dcrnn_model(x, y, batches_seen)
+
+                if batches_seen == 0:
+                    # This is a workaround to accommodate dynamically registered parameters in DCGRUCell
+                    optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=base_lr, eps=epsilon)
+
+                # Compute loss
+                loss = self._compute_loss(y, output)
+
+                # Apply weights
+                batch_weights = self._data['train_loader'].weights[_ * self._data['train_loader'].batch_size:(_ + 1) * self._data['train_loader'].batch_size]
+
+                # Multiply loss by batch_weights
+                weighted_loss = torch.mean(loss.cpu() * torch.Tensor(batch_weights))
+
+                self._logger.debug(weighted_loss.item())
+
+                losses.append(weighted_loss.item())
+
+                batches_seen += 1
+                weighted_loss.backward()
+
+                # Gradient clipping
+                # torch.nn.utils.clip_grad_norm_(self.dcrnn_model.parameters(), self.max_grad_norm)
+
+                optimizer.step()
+
+            epoch_loss = np.mean(losses)
+            end_time = time.time()
+
+            self._logger.info("Epoch {} completed. Loss: {:.4f}".format(epoch_num, epoch_loss))
+            lr_scheduler.step()
+            self._logger.info("Evaluating now!")
+            #'''
 
             val_loss, y_val = self.evaluate(dataset='val', batches_seen=batches_seen)
             val_loss_decreased = val_loss < min_val_loss
 
-            if store_val_plot and val_loss_decreased:
+            if store_val_plot and val_loss_decreased: #and wait_plot > wait_plot_thresh:
+                #wait_plot = 0
                 prediction = torch.tensor(y_val['prediction'])
                 truth = torch.tensor(y_val['truth'])
                 
                 path = os.path.join(self._log_dir, 'plots/val/')
                 plot_utils.store_pred_vs_truth_plots(self._data['x_val'], self._data['y_val'], prediction, truth, self._active_nodes, path)
+
+                #### TRAIN plot
+                #train_loss, y_train = self.evaluate(dataset='train', batches_seen=batches_seen)
+
+                #prediction = torch.tensor(y_train['prediction'])
+                #truth = torch.tensor(y_train['truth'])
+                
+                #path = os.path.join(self._log_dir, 'plots/train/')
+                #plot_utils.store_pred_vs_truth_plots(self._data['x_train'], self._data['y_train'], prediction, truth, self._active_nodes, path)
+                ###
 
             end_time = time.time()
 
@@ -378,13 +443,20 @@ class DCRNNSupervisor:
                                     batches_seen)
 
             if (epoch_num % log_every) == log_every - 1:
-                message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, ' \
+                '''message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, ' \
                           '{:.1f}s'.format(epoch_num, epochs, batches_seen,
                                            np.mean(losses), val_loss, lr_scheduler.get_lr()[0],
+                                           (end_time - start_time))'''
+                
+                message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, ' \
+                          '{:.1f}s'.format(epoch_num, epochs, batches_seen,
+                                           np.mean(losses), val_loss, optimizer.param_groups[0]['lr'],
                                            (end_time - start_time))
+                
                 self._logger.info(message)
 
-            if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1 or val_loss_decreased:
+            if ((epoch_num % test_every_n_epochs) == test_every_n_epochs - 1 or val_loss_decreased): #and wait_plot > wait_plot_thresh:
+                #wait_plot = 0
                 # test
                 # evaluate model on test data
                 test_losses, y = self.evaluate_multiple_metrics(dataset='test', batches_seen=batches_seen)
@@ -394,12 +466,17 @@ class DCRNNSupervisor:
                 truth = torch.tensor(y['truth'])
                 path = os.path.join(self._log_dir, 'plots/test/')
                 plot_utils.store_pred_vs_truth_plots(self._data['x_test'], self._data['y_test'], prediction, truth, self._active_nodes, path)
+                
 
                 # store prediction vs truth values
 
-                message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, test_mae: {:.4f}, test_rmse: {:.4f}, test_mape: {:.4f},  lr: {:.6f}, ' \
+                '''message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, test_mae: {:.4f}, test_rmse: {:.4f}, test_mape: {:.4f},  lr: {:.6f}, ' \
                           '{:.1f}s'.format(epoch_num, epochs, batches_seen,
                                            np.mean(losses), test_losses['mae'], test_losses['rmse'], test_losses['mape'], lr_scheduler.get_lr()[0],
+                                           (end_time - start_time))'''
+                message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, test_mae: {:.4f}, test_rmse: {:.4f}, test_mape: {:.4f},  lr: {:.6f}, ' \
+                          '{:.1f}s'.format(epoch_num, epochs, batches_seen,
+                                           np.mean(losses), test_losses['mae'], test_losses['rmse'], test_losses['mape'],  optimizer.param_groups[0]['lr'],
                                            (end_time - start_time))
                 self._logger.info(message)
 

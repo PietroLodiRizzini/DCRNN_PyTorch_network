@@ -14,7 +14,7 @@ from multiprocessing import Pool
 
 from scipy.sparse import linalg
 
-
+#'''
 class DataLoader(object):
     def __init__(self, xs, ys, batch_size, pad_with_last_sample=True, shuffle=False):
         """
@@ -53,7 +53,61 @@ class DataLoader(object):
                 self.current_ind += 1
 
         return _wrapper()
+'''
+import numpy as np
 
+class DataLoader(object):
+    def __init__(self, xs, ys, batch_size, threshold=0.75, pad_with_last_sample=True, shuffle=False):
+        """
+        :param xs: Input data.
+        :param ys: Target data.
+        :param batch_size: Batch size.
+        :param threshold: Threshold value for assigning higher weights to samples where ys > threshold.
+        :param pad_with_last_sample: Pad with the last sample to make the number of samples divisible by batch_size.
+        :param shuffle: Whether to shuffle the data.
+        """
+        self.batch_size = batch_size
+        self.current_ind = 0
+
+        # Calculate weights based on the threshold
+        weights = np.where(ys > threshold, 1.0, 1.0)
+        weights = weights.reshape(-1, 1)  # Reshape to match the shape of xs and ys
+
+        if pad_with_last_sample:
+            num_padding = (batch_size - (len(xs) % batch_size)) % batch_size
+            x_padding = np.repeat(xs[-1:], num_padding, axis=0)
+            y_padding = np.repeat(ys[-1:], num_padding, axis=0)
+            xs = np.concatenate([xs, x_padding], axis=0)
+            ys = np.concatenate([ys, y_padding], axis=0)
+            weights = np.concatenate([weights, np.ones((num_padding, 1))], axis=0)
+
+        self.size = len(xs)
+        self.num_batch = int(self.size // self.batch_size)
+
+        if shuffle:
+            permutation = np.random.permutation(self.size)
+            xs, ys, weights = xs[permutation], ys[permutation], weights[permutation]
+
+        self.xs = xs
+        self.ys = ys
+        self.weights = weights
+
+    def get_iterator(self):
+        self.current_ind = 0
+
+        def _wrapper():
+            while self.current_ind < self.num_batch:
+                start_ind = self.batch_size * self.current_ind
+                end_ind = min(self.size, self.batch_size * (self.current_ind + 1))
+                indices = np.random.choice(range(start_ind, end_ind), size=self.batch_size, p=self.weights[start_ind:end_ind, 0] / np.sum(self.weights[start_ind:end_ind, 0]), replace=True)
+                x_i = self.xs[indices, ...]
+                y_i = self.ys[indices, ...]
+                yield (x_i, y_i)
+                self.current_ind += 1
+
+        return _wrapper()
+
+'''
 
 class StandardScaler:
     """
@@ -192,7 +246,7 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
         data['y_' + category] = cat_data['y']
 
 
-    scaler = StandardScaler(mean=data['x_train'][..., 1:].mean(), std=data['x_train'][..., 1:].std())
+    #scaler = StandardScaler(mean=data['x_train'][..., 1:].mean(), std=data['x_train'][..., 1:].std())
     scaler = MinMaxScaler()
     scaler.fit(np.concatenate((np.reshape(data['x_train'], -1), np.reshape(data['y_train'], -1))))
     
